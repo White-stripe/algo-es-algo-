@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Monitor de Rostros</title>
+<style>
+  /* Concepto: dos visores apilados (vista general y zoom al rostro), controles al alcance del pulgar, galería y bitácora debajo. */
+  :root {
+    --bg: #0d1114;
+    --panel: #141b20;
+    --line: #26333b;
+    --fg: #e8eef1;
+    --muted: #8fa3ad;
+    --accent: #ffb347;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); }
+  body {
+    padding-top: max(12px, env(safe-area-inset-top, 0px));
+    padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  main { max-width: 560px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 1.25rem; letter-spacing: 0.01em; text-wrap: balance; }
+  .pill {
+    font: 600 0.72rem/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 7px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+    display: inline-flex; align-items: center; gap: 7px; max-width: 100%;
+  }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+  .pill[data-kind="ok"] { color: var(--ok); }
+  .pill[data-kind="warn"] { color: var(--warn); }
+  .pill[data-kind="err"] { color: var(--err); }
+
+  .stage {
+    position: relative; aspect-ratio: 4 / 3; max-width: 100%;
+    background: #000; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  }
+  .view { position: absolute; inset: 0; }
+  .view.mirror { transform: scaleX(-1); }
+  .view video, .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .idle {
+    position: absolute; inset: 0; display: grid; place-content: center; justify-items: center;
+    gap: 14px; padding: 20px; text-align: center; color: var(--muted);
+  }
+  .idle p { margin: 0; max-width: 32ch; }
+  .hud { position: absolute; left: 10px; right: 10px; top: 10px; display: flex; justify-content: space-between; gap: 6px; flex-wrap: wrap; pointer-events: none; }
+  .hud span {
+    font: 600 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+    background: rgba(0,0,0,0.6); padding: 6px 8px; border-radius: 6px; font-variant-numeric: tabular-nums;
+  }
+  .live { color: var(--err); }
+  .rec { color: #fff; background: rgba(220,38,38,0.85) !important; }
+  .count-badge { color: var(--accent); }
+  .tag { position: absolute; left: 10px; top: 10px; font: 600 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; background: rgba(0,0,0,0.6); color: var(--accent); padding: 6px 8px; border-radius: 6px; font-variant-numeric: tabular-nums; }
+  .pip {
+    position: absolute; right: 8px; bottom: 8px; width: 30%; aspect-ratio: 4 / 3;
+    border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #000;
+  }
+  .pip.mirror video { transform: scaleX(-1); }
+  .pip video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .pip span { position: absolute; left: 4px; top: 4px; font: 600 0.6rem/1 var(--mono); background: rgba(0,0,0,0.6); padding: 3px 5px; border-radius: 4px; letter-spacing: 0.06em; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btn {
+    font: 600 0.95rem/1 var(--sans); color: var(--fg); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 13px 16px; min-height: 46px;
+    cursor: pointer; flex: 1 1 auto;
+  }
+  .btn:hover { border-color: var(--muted); }
+  .btn:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #1b1305; }
+  .btn.danger { background: transparent; border-color: var(--err); color: var(--err); }
+  .btn.small { flex: none; min-height: 36px; padding: 8px 12px; font-size: 0.8rem; }
+  .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 12px; }
+  details.panel > summary { cursor: pointer; font-weight: 600; list-style-position: inside; }
+  details.panel[open] > summary { margin-bottom: 4px; }
+  .group { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .group:first-of-type { border-top: 0; padding-top: 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 0; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  select {
+    font: 0.95rem var(--sans); color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px; min-height: 44px; max-width: 100%;
+  }
+  .switch { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .switch input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  .stat b { display: block; font: 700 1.5rem/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+  .stat small { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }
+
+  h2 { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+  #log { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; display: grid; gap: 0; }
+  #log li { display: flex; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
+  #log li:first-child { border-top: 0; }
+  #log time { font: 0.8rem/1.6 var(--mono); color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+  #log .empty { color: var(--muted); }
+  #log li[data-kind="in"] span { color: var(--accent); }
+
+  #gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  #gallery .hint { grid-column: 1 / -1; }
+  .item { display: grid; gap: 6px; min-width: 0; align-content: start; }
+  .item img, .item video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #000; border-radius: 8px; border: 1px solid var(--line); display: block; }
+  .item p { margin: 0; font: 0.72rem/1.3 var(--mono); color: var(--muted); }
+  .item .acts { display: flex; gap: 6px; }
+  .item .acts .btn { padding: 8px 6px; min-height: 34px; font-size: 0.75rem; }
+
+  #photoCanvas { display: none; width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--line); }
+  footer { color: var(--muted); font-size: 0.8rem; }
+  @media (prefers-reduced-motion: no-preference) { .live { animation: blink 1.4s steps(2, jump-none) infinite; } }
+  @keyframes blink { 50% { opacity: 0.35; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Monitor de Rostros</h1>
+    <span id="status" class="pill" data-kind="">En espera</span>
+  </header>
+
+  <section class="stage" aria-label="Vista general">
+    <div id="view" class="view">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="idle" class="idle">
+      <p>Toca Iniciar para activar la cámara y detectar rostros en tiempo real.</p>
+    </div>
+    <div id="hud" class="hud" hidden>
+      <span class="live">● En vivo</span>
+      <span class="rec" id="recBadge" hidden>● REC 00:00</span>
+      <span class="count-badge" id="badge">0 rostros</span>
+    </div>
+    <div id="pip" class="pip" hidden>
+      <video id="video2" playsinline muted></video>
+      <span>Cámara 2 · panorama</span>
+    </div>
+  </section>
+
+  <section class="stage" aria-label="Zoom al rostro">
+    <div id="zview" class="view">
+      <canvas id="zoomCanvas" width="640" height="480"></canvas>
+    </div>
+    <span class="tag" id="zoomTag">Zoom 1.0×</span>
+  </section>
+
+  <div class="controls">
+    <button id="startBtn" class="btn primary" type="button">Iniciar cámara</button>
+    <button id="recBtn" class="btn" type="button" disabled>● Grabar</button>
+    <button id="flipBtn" class="btn" type="button" disabled>Cambiar cámara</button>
+    <button id="stopBtn" class="btn danger" type="button" disabled>Detener</button>
+  </div>
+
+  <section class="stats" aria-label="Estadísticas">
+    <div class="stat"><b id="nowCount">0</b><small>Ahora</small></div>
+    <div class="stat"><b id="maxCount">0</b><small>Máximo</small></div>
+    <div class="stat"><b id="fps">0</b><small>FPS</small></div>
+  </section>
+
+  <details class="panel">
+    <summary>Ajustes</summary>
+
+    <div class="group">
+      <h2>Detección</h2>
+      <div class="row">
+        <label for="conf">Sensibilidad (confianza mínima)</label>
+        <b id="confVal" style="font-family:var(--mono)">50%</b>
+      </div>
+      <input id="conf" type="range" min="30" max="90" value="50" step="5">
+      <p class="hint">Más baja detecta más rostros pero puede dar falsos positivos.</p>
+      <label class="switch" for="alerts">
+        <input id="alerts" type="checkbox" checked>
+        <span>Sonido y vibración cuando aparece un rostro</span>
+      </label>
+    </div>
+
+    <div class="group">
+      <h2>Zoom al rostro</h2>
+      <div class="row">
+        <label for="frame">Encuadre</label>
+        <b id="frameVal" style="font-family:var(--mono)">3.2× el rostro</b>
+      </div>
+      <input id="frame" type="range" min="15" max="60" value="32" step="1">
+      <p class="hint">El visor de abajo sigue al rostro más grande y vuelve a la vista completa cuando no hay nadie.</p>
+    </div>
+
+    <div class="group">
+      <h2>Grabación y capturas</h2>
+      <div class="row">
+        <label for="recMode">Grabar el panorama</label>
+        <select id="recMode">
+          <option value="face">Al detectar un rostro</option>
+          <option value="always">Siempre</option>
+          <option value="manual">Solo con el botón Grabar</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="postRoll">Seguir grabando después de que se va</label>
+        <select id="postRoll">
+          <option value="3">3 segundos</option>
+          <option value="5">5 segundos</option>
+          <option value="10">10 segundos</option>
+          <option value="30">30 segundos</option>
+        </select>
+      </div>
+      <label class="switch" for="recZoom">
+        <input id="recZoom" type="checkbox">
+        <span>Grabar también el video del zoom</span>
+      </label>
+      <label class="switch" for="snap">
+        <input id="snap" type="checkbox" checked>
+        <span>Tomar fotos (panorama y zoom) cuando aparece un rostro</span>
+      </label>
+      <label class="switch" for="recAudio">
+        <input id="recAudio" type="checkbox">
+        <span>Grabar con audio (se aplica al iniciar la cámara)</span>
+      </label>
+      <label class="switch" for="dual">
+        <input id="dual" type="checkbox">
+        <span>Usar una segunda cámara para el panorama (si tu teléfono lo permite)</span>
+      </label>
+      <p class="hint">Con dos cámaras, la que elijas con Cambiar cámara detecta y hace zoom, y la otra graba el panorama. Muchos teléfonos solo abren una a la vez; en ese caso se usa la misma cámara para todo.</p>
+    </div>
+  </details>
+
+  <section class="panel" aria-label="Capturas y videos">
+    <div class="row">
+      <h2>Capturas y videos</h2>
+      <button id="clearGallery" class="btn small" type="button">Borrar todo</button>
+    </div>
+    <div id="gallery"><p class="hint">Aún no hay capturas ni videos.</p></div>
+    <p id="galleryInfo" class="hint"></p>
+  </section>
+
+  <section class="panel" aria-label="Bitácora">
+    <div class="row">
+      <h2>Bitácora</h2>
+      <span style="display:flex;gap:8px">
+        <button id="exportLog" class="btn small" type="button">Exportar CSV</button>
+        <button id="clearLog" class="btn small" type="button">Limpiar</button>
+      </span>
+    </div>
+    <ul id="log"><li class="empty">Aún no hay eventos.</li></ul>
+  </section>
+
+  <section class="panel" aria-label="Analizar una foto">
+    <h2>Sin cámara en vivo</h2>
+    <p class="hint">Si el navegador no da acceso a la cámara, toma o elige una foto y se analiza igual.</p>
+    <input id="photoInput" type="file" accept="image/*" capture="user" hidden>
+    <button id="photoBtn" class="btn" type="button">Tomar o elegir foto</button>
+    <canvas id="photoCanvas"></canvas>
+    <p id="photoResult" class="hint" aria-live="polite"></p>
+  </section>
+
+  <footer>
+    La detección ocurre en tu dispositivo. Las capturas y videos se guardan solo en este navegador y no se envían a ningún servidor. La app detecta que hay un rostro; no identifica a nadie. Si monitoreas a otras personas, avísales y cumple las leyes de tu país.
+  </footer>
+</main>
+
+<script type="module">
+import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+const MAX_SEG = 120000; // los videos se parten cada 2 minutos
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), video2 = $("video2"), overlay = $("overlay"), ctx = overlay.getContext("2d");
+const zoomCanvas = $("zoomCanvas"), zctx = zoomCanvas.getContext("2d");
+const view = $("view"), zview = $("zview"), idle = $("idle"), hud = $("hud"), pip = $("pip");
+const startBtn = $("startBtn"), flipBtn = $("flipBtn"), stopBtn = $("stopBtn"), recBtn = $("recBtn");
+
+let detector = null, vision = null, stream = null, secondStream = null, facing = "user";
+let running = false, rafId = 0, lastVideoTime = -1, wakeLock = null, tickTimer = 0;
+let present = false, lastSeen = -1e9, prevCount = 0, maxFaces = 0, frames = 0, fpsStamp = performance.now();
+let audioCtx = null, zr = null, lastTarget = null, manualRec = false, lastSnap = 0;
+const recs = { pano: null, zoom: null };
+const events = [];
+
+/* ---------- Ajustes guardados ---------- */
+const SETTINGS = ["conf", "alerts", "frame", "recMode", "postRoll", "recZoom", "recAudio", "dual", "snap"];
+function saveSettings() {
+  try {
+    const o = {};
+    for (const id of SETTINGS) { const el = $(id); o[id] = el.type === "checkbox" ? el.checked : el.value; }
+    localStorage.setItem("mr-settings", JSON.stringify(o));
+  } catch (e) { /* sin almacenamiento */ }
+}
+function loadSettings() {
+  try {
+    const o = JSON.parse(localStorage.getItem("mr-settings") || "{}");
+    for (const id of SETTINGS) {
+      if (!(id in o)) continue;
+      const el = $(id);
+      if (el.type === "checkbox") el.checked = !!o[id]; else el.value = o[id];
+    }
+  } catch (e) { /* ajustes por defecto */ }
+  $("confVal").textContent = $("conf").value + "%";
+  $("frameVal").textContent = (Number($("frame").value) / 10).toFixed(1) + "× el rostro";
+}
+loadSettings();
+for (const id of SETTINGS) $(id).addEventListener("change", saveSettings);
+
+/* ---------- Almacenamiento de capturas y videos ---------- */
+const store = (() => {
+  let db = null, mem = [], nextId = 1;
+  const ready = new Promise((res) => {
+    try {
+      const r = indexedDB.open("monitor-rostros", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("items", { keyPath: "id", autoIncrement: true });
+      r.onsuccess = () => { db = r.result; res(); };
+      r.onerror = () => res();
+      r.onblocked = () => res();
+    } catch (e) { res(); }
+  });
+  const os = (mode) => db.transaction("items", mode).objectStore("items");
+  const wrap = (req) => new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
+  return {
+    ready,
+    persistent: () => !!db,
+    async add(item) { await ready; if (!db) { item.id = nextId++; mem.push(item); return; } await wrap(os("readwrite").add(item)); },
+    async all() { await ready; return db ? wrap(os("readonly").getAll()) : mem.slice(); },
+    async del(id) { await ready; if (!db) { mem = mem.filter((i) => i.id !== id); return; } await wrap(os("readwrite").delete(id)); },
+    async clear() { await ready; if (!db) { mem = []; return; } await wrap(os("readwrite").clear()); }
+  };
+})();
+
+async function save(item) {
+  try { await store.add(item); return true; }
+  catch (e) { log("No se pudo guardar (almacenamiento lleno). Borra elementos de la galería."); return false; }
+}
+
+/* ---------- Utilidades ---------- */
+function setStatus(text, kind = "") { const el = $("status"); el.textContent = text; el.dataset.kind = kind; }
+const pad = (n) => String(n).padStart(2, "0");
+const fmt = (ms) => { const s = Math.floor(ms / 1000); return pad(Math.floor(s / 60)) + ":" + pad(s % 60); };
+function stamp(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+function download(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+const toBlob = (canvas) => new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.88));
+
+function log(text, kind = "") {
+  events.push({ t: new Date(), text });
+  const ul = $("log");
+  const empty = ul.querySelector(".empty");
+  if (empty) empty.remove();
+  const li = document.createElement("li");
+  li.dataset.kind = kind;
+  const t = document.createElement("time");
+  t.textContent = new Date().toLocaleTimeString("es-MX", { hour12: false });
+  const s = document.createElement("span");
+  s.textContent = text;
+  li.append(t, s);
+  ul.prepend(li);
+  while (ul.children.length > 80) ul.lastChild.remove();
+}
+
+/* ---------- Detector ---------- */
+async function loadDetector() {
+  if (detector) return;
+  setStatus("Cargando modelo", "warn");
+  vision = await FilesetResolver.forVisionTasks(WASM_URL);
+  const minConf = Number($("conf").value) / 100;
+  const make = (delegate) => FaceDetector.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: "VIDEO",
+    minDetectionConfidence: minConf
+  });
+  try { detector = await make("GPU"); }
+  catch (e) { detector = await make("CPU"); }
+}
+
+/* ---------- Alertas ---------- */
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = "sine"; o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.18);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.2);
+  } catch (e) { /* sin audio */ }
+}
+function notify() {
+  if (!$("alerts").checked) return;
+  beep();
+  try { navigator.vibrate && navigator.vibrate(120); } catch (e) { /* sin vibración */ }
+}
+async function lockScreen() {
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { wakeLock = null; }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && running) lockScreen();
+});
+
+/* ---------- Dibujo y zoom ---------- */
+function drawFaces(c, dets, w, h) {
+  c.lineWidth = Math.max(2, w / 220);
+  c.strokeStyle = "#ffb347";
+  c.fillStyle = "#ffb347";
+  for (const d of dets) {
+    const b = d.boundingBox;
+    const x = b.originX, y = b.originY, bw = b.width, bh = b.height;
+    const k = Math.min(bw, bh) * 0.22;
+    c.beginPath();
+    c.moveTo(x, y + k); c.lineTo(x, y); c.lineTo(x + k, y);
+    c.moveTo(x + bw - k, y); c.lineTo(x + bw, y); c.lineTo(x + bw, y + k);
+    c.moveTo(x + bw, y + bh - k); c.lineTo(x + bw, y + bh); c.lineTo(x + bw - k, y + bh);
+    c.moveTo(x + k, y + bh); c.lineTo(x, y + bh); c.lineTo(x, y + bh - k);
+    c.stroke();
+    for (const p of d.keypoints || []) {
+      c.beginPath();
+      c.arc(p.x * w, p.y * h, Math.max(2, w / 260), 0, Math.PI * 2);
+      c.fill();
+    }
+  }
+}
+
+function setupZoom(w, h) {
+  zoomCanvas.width = 640;
+  zoomCanvas.height = Math.round(640 * h / w);
+  zr = { x: 0, y: 0, w, h };
+  lastTarget = null;
+}
+
+function computeTarget(dets, vw, vh) {
+  let best = null, area = 0;
+  for (const d of dets) {
+    const b = d.boundingBox, a = b.width * b.height;
+    if (a > area) { area = a; best = b; }
+  }
+  if (!best) return null;
+  const k = Number($("frame").value) / 10;
+  const aspect = vw / vh;
+  let ch = Math.max(best.height * k, best.width * k / aspect);
+  let cw = ch * aspect;
+  if (ch > vh) { ch = vh; cw = ch * aspect; }
+  if (cw > vw) { cw = vw; ch = cw / aspect; }
+  const cx = best.originX + best.width / 2, cy = best.originY + best.height / 2;
+  return {
+    x: Math.min(Math.max(cx - cw / 2, 0), vw - cw),
+    y: Math.min(Math.max(cy - ch / 2, 0), vh - ch),
+    w: cw, h: ch
+  };
+}
+
+function renderZoom(dets, vw, vh) {
+  const t = computeTarget(dets, vw, vh);
+  if (t) lastTarget = t;
+  const target = present && lastTarget ? lastTarget : { x: 0, y: 0, w: vw, h: vh };
+  const f = 0.18;
+  zr = {
+    x: zr.x + (target.x - zr.x) * f,
+    y: zr.y + (target.y - zr.y) * f,
+    w: zr.w + (target.w - zr.w) * f,
+    h: zr.h + (target.h - zr.h) * f
+  };
+  zctx.drawImage(video, zr.x, zr.y, zr.w, zr.h, 0, 0, zoomCanvas.width, zoomCanvas.height);
+  $("zoomTag").textContent = "Zoom " + (vw / zr.w).toFixed(1) + "×";
+}
+
+/* ---------- Eventos de presencia ---------- */
+function updateEvents(count, now) {
+  if (count > 0) {
+    lastSeen = now;
+    if (!present) {
+      present = true;
+      log(count === 1 ? "Rostro detectado" : `${count} rostros detectados`, "in");
+      notify();
+      lastSnap = now;
+      setTimeout(snap, 700);
+    } else if (count !== prevCount) {
+      log(`${count} ${count === 1 ? "rostro" : "rostros"} en cámara`, "in");
+      if (count > prevCount) notify();
+    }
+    prevCount = count;
+  } else if (present && now - lastSeen > 1200) {
+    present = false;
+    prevCount = 0;
+    log("Sin rostros en cámara");
+  }
+}
+
+/* ---------- Capturas ---------- */
+async function snap() {
+  if (!running || !present || !$("snap").checked) return;
+  lastSnap = performance.now();
+  const pv = secondStream ? video2 : video;
+  if (!pv.videoWidth) return;
+  const c = document.createElement("canvas");
+  c.width = pv.videoWidth; c.height = pv.videoHeight;
+  c.getContext("2d").drawImage(pv, 0, 0);
+  const [bp, bz] = await Promise.all([toBlob(c), toBlob(zoomCanvas)]);
+  const t = Date.now();
+  const a = await save({ type: "photo", kind: "pano", time: t, mime: "image/jpeg", blob: bp });
+  await save({ type: "photo", kind: "zoom", time: t, mime: "image/jpeg", blob: bz });
+  if (a) { log("Captura guardada"); refreshGallery(); }
+}
+
+/* ---------- Grabación ---------- */
+function pickMime() {
+  const list = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
+  if (!window.MediaRecorder) return null;
+  for (const t of list) if (MediaRecorder.isTypeSupported(t)) return t;
+  return "";
+}
+function panoStream() {
+  const src = secondStream || stream;
+  const tracks = [...src.getVideoTracks()];
+  const a = stream.getAudioTracks()[0];
+  if (a) tracks.push(a);
+  return new MediaStream(tracks);
+}
+function zoomStream() {
+  const cs = zoomCanvas.captureStream(20);
+  const a = stream.getAudioTracks()[0];
+  if (a) cs.addTrack(a.clone());
+  return cs;
+}
+let recWarned = false;
+function startRec(kind, mediaStream) {
+  if (recs[kind]) return;
+  const mime = pickMime();
+  if (mime === null) {
+    if (!recWarned) { recWarned = true; log("Este navegador no permite grabar video."); }
+    return;
+  }
+  let mr;
+  try { mr = new MediaRecorder(mediaStream, mime ? { mimeType: mime, videoBitsPerSecond: 2000000 } : {}); }
+  catch (e) {
+    if (!recWarned) { recWarned = true; log("No se pudo iniciar la grabación."); }
+    return;
+  }
+  const chunks = [], t0 = Date.now();
+  mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstop = async () => {
+    recs[kind] = null;
+    const blob = new Blob(chunks, { type: mr.mimeType || mime || "video/webm" });
+    if (blob.size > 0) {
+      const ok = await save({ type: "video", kind, time: t0, dur: Date.now() - t0, mime: blob.type, blob });
+      if (ok) { log(kind === "zoom" ? "Video del zoom guardado" : "Video del panorama guardado"); refreshGallery(); }
+    }
+    updateRecUI();
+  };
+  mr.start(1000);
+  recs[kind] = { mr, t0 };
+  updateRecUI();
+}
+function stopRec(kind) {
+  const r = recs[kind];
+  if (r && r.mr.state !== "inactive") { try { r.mr.stop(); } catch (e) { /* ya detenido */ } }
+}
+function wantRecord(now) {
+  if (!running) return false;
+  if (manualRec) return true;
+  const m = $("recMode").value;
+  if (m === "always") return true;
+  if (m === "face") return present || (now - lastSeen < Number($("postRoll").value) * 1000);
+  return false;
+}
+function syncRecording(now) {
+  if (wantRecord(now)) {
+    if (!recs.pano) startRec("pano", panoStream());
+    if ($("recZoom").checked && !recs.zoom) startRec("zoom", zoomStream());
+    for (const k of ["pano", "zoom"]) if (recs[k] && Date.now() - recs[k].t0 > MAX_SEG) stopRec(k);
+  } else {
+    stopRec("pano"); stopRec("zoom");
+  }
+}
+function updateRecUI() {
+  const r = recs.pano || recs.zoom;
+  const b = $("recBadge");
+  if (r) { b.hidden = false; b.textContent = "● REC " + fmt(Date.now() - r.t0); } else b.hidden = true;
+  recBtn.textContent = manualRec ? "■ Parar grabación" : "● Grabar";
+  recBtn.classList.toggle("danger", manualRec);
+}
+
+/* ---------- Bucle principal ---------- */
+function frame() {
+  if (!running) return;
+  if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const w = video.videoWidth, h = video.videoHeight;
+    if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; setupZoom(w, h); }
+    let dets = [];
+    try { dets = detector.detectForVideo(video, performance.now()).detections; }
+    catch (e) { dets = []; }
+    ctx.clearRect(0, 0, w, h);
+    drawFaces(ctx, dets, w, h);
+    const n = dets.length, now = performance.now();
+    $("nowCount").textContent = n;
+    $("badge").textContent = `${n} ${n === 1 ? "rostro" : "rostros"}`;
+    if (n > maxFaces) { maxFaces = n; $("maxCount").textContent = n; }
+    updateEvents(n, now);
+    renderZoom(dets, w, h);
+    syncRecording(now);
+    if (present && now - lastSnap > 8000) snap();
+    frames++;
+    if (now - fpsStamp >= 1000) {
+      $("fps").textContent = Math.round(frames * 1000 / (now - fpsStamp));
+      frames = 0; fpsStamp = now;
+    }
+  }
+  rafId = requestAnimationFrame(frame);
+}
+
+/* ---------- Cámaras ---------- */
+async function openCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw Object.assign(new Error("insecure"), { name: "InsecureContext" });
+  }
+  const v = { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } };
+  const wantAudio = $("recAudio").checked;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: v, audio: wantAudio });
+  } catch (e) {
+    if (!wantAudio) throw e;
+    stream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+    log("No se pudo usar el micrófono. Se graba sin audio.");
+  }
+  video.srcObject = stream;
+  await video.play();
+  view.classList.toggle("mirror", facing === "user");
+  zview.classList.toggle("mirror", facing === "user");
+}
+
+function closeSecond() {
+  if (secondStream) { secondStream.getTracks().forEach((t) => t.stop()); secondStream = null; }
+  video2.srcObject = null;
+  pip.hidden = true;
+}
+
+async function openSecond() {
+  closeSecond();
+  if (!$("dual").checked) return;
+  const other = facing === "user" ? "environment" : "user";
+  try {
+    secondStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: other, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+    });
+    video2.srcObject = secondStream;
+    await video2.play();
+    await new Promise((r) => setTimeout(r, 600));
+    const alive = stream.getVideoTracks().every((t) => t.readyState === "live")
+      && secondStream.getVideoTracks().every((t) => t.readyState === "live");
+    if (!alive) throw new Error("single");
+    pip.classList.toggle("mirror", other === "user");
+    pip.hidden = false;
+    log("Segunda cámara activa: graba el panorama");
+  } catch (e) {
+    closeSecond();
+    if (!stream || stream.getVideoTracks().some((t) => t.readyState !== "live")) {
+      stopStream();
+      try { await openCamera(); } catch (e2) { /* se informa en start */ }
+    }
+    log("Este teléfono no permite dos cámaras a la vez. Se usa una sola.");
+  }
+}
+
+function stopStream() {
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  video.srcObject = null;
+}
+
+async function start() {
+  startBtn.disabled = true;
+  try { await loadDetector(); }
+  catch (e) {
+    setStatus("Sin modelo", "err");
+    idle.hidden = false;
+    idle.firstElementChild.textContent = "No se pudo cargar el detector. Revisa tu conexión a internet e inténtalo otra vez.";
+    startBtn.disabled = false;
+    return;
+  }
+  try {
+    await detector.setOptions({ runningMode: "VIDEO", minDetectionConfidence: Number($("conf").value) / 100 });
+    await openCamera();
+    await openSecond();
+    if (!stream || stream.getVideoTracks().some((t) => t.readyState !== "live")) throw Object.assign(new Error("lost"), { name: "NotReadableError" });
+  } catch (e) {
+    const msgs = {
+      NotAllowedError: "Permiso de cámara denegado. Actívalo en los ajustes del navegador.",
+      NotFoundError: "No se encontró ninguna cámara en este dispositivo.",
+      NotReadableError: "La cámara está en uso por otra app.",
+      InsecureContext: "El navegador bloquea la cámara en esta página. Ábrela desde una dirección https://."
+    };
+    setStatus("Sin cámara", "err");
+    idle.hidden = false;
+    idle.firstElementChild.textContent = msgs[e.name] || "No se pudo abrir la cámara.";
+    closeSecond(); stopStream();
+    startBtn.disabled = false;
+    return;
+  }
+  running = true;
+  idle.hidden = true; hud.hidden = false;
+  flipBtn.disabled = false; stopBtn.disabled = false; recBtn.disabled = false;
+  startBtn.textContent = "Cámara activa";
+  setStatus("Monitoreando", "ok");
+  log("Monitoreo iniciado");
+  lockScreen();
+  frames = 0; fpsStamp = performance.now(); lastVideoTime = -1;
+  tickTimer = setInterval(updateRecUI, 500);
+  rafId = requestAnimationFrame(frame);
+}
+
+function stop() {
+  running = false;
+  cancelAnimationFrame(rafId);
+  clearInterval(tickTimer);
+  manualRec = false;
+  stopRec("pano"); stopRec("zoom");
+  closeSecond(); stopStream();
+  try { wakeLock && wakeLock.release(); } catch (e) { /* nada */ }
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  zctx.clearRect(0, 0, zoomCanvas.width, zoomCanvas.height);
+  idle.hidden = false; hud.hidden = true;
+  idle.firstElementChild.textContent = "Toca Iniciar para activar la cámara y detectar rostros en tiempo real.";
+  startBtn.disabled = false; startBtn.textContent = "Iniciar cámara";
+  flipBtn.disabled = true; stopBtn.disabled = true; recBtn.disabled = true;
+  $("nowCount").textContent = 0; $("fps").textContent = 0;
+  $("zoomTag").textContent = "Zoom 1.0×";
+  present = false; prevCount = 0; lastSeen = -1e9;
+  updateRecUI();
+  setStatus("En espera");
+  log("Monitoreo detenido");
+}
+
+async function flip() {
+  flipBtn.disabled = true;
+  running = false;
+  cancelAnimationFrame(rafId);
+  stopRec("pano"); stopRec("zoom");
+  closeSecond(); stopStream();
+  facing = facing === "user" ? "environment" : "user";
+  try {
+    await openCamera();
+  } catch (e) {
+    facing = facing === "user" ? "environment" : "user";
+    try { await openCamera(); } catch (e2) { stop(); return; }
+  }
+  await openSecond();
+  running = true; lastVideoTime = -1; zr = null;
+  overlay.width = 0;
+  rafId = requestAnimationFrame(frame);
+  flipBtn.disabled = false;
+}
+
+/* ---------- Galería ---------- */
+let urls = [];
+async function refreshGallery() {
+  urls.forEach((u) => URL.revokeObjectURL(u)); urls = [];
+  let items = [];
+  try { items = (await store.all()).sort((a, b) => b.time - a.time).slice(0, 40); } catch (e) { items = []; }
+  const g = $("gallery");
+  g.replaceChildren();
+  if (!items.length) {
+    const p = document.createElement("p");
+    p.className = "hint"; p.textContent = "Aún no hay capturas ni videos.";
+    g.append(p);
+  }
+  for (const it of items) {
+    const url = URL.createObjectURL(it.blob); urls.push(url);
+    const card = document.createElement("article");
+    card.className = "item";
+    let media;
+    if (it.type === "video") {
+      media = document.createElement("video");
+      media.controls = true; media.playsInline = true; media.preload = "metadata"; media.src = url;
+    } else {
+      media = document.createElement("img");
+      media.src = url; media.alt = it.kind === "zoom" ? "Captura del zoom" : "Captura del panorama";
+    }
+    const cap = document.createElement("p");
+    const kindLabel = it.type === "video" ? (it.kind === "zoom" ? "Video zoom" : "Video panorama") : (it.kind === "zoom" ? "Foto zoom" : "Foto panorama");
+    cap.textContent = `${kindLabel} · ${new Date(it.time).toLocaleTimeString("es-MX", { hour12: false })}` + (it.dur ? ` · ${fmt(it.dur)}` : "");
+    const acts = document.createElement("div");
+    acts.className = "acts";
+    const dl = document.createElement("button");
+    dl.className = "btn"; dl.type = "button"; dl.textContent = "Descargar";
+    dl.addEventListener("click", () => {
+      const ext = it.mime.includes("mp4") ? "mp4" : it.mime.includes("webm") ? "webm" : "jpg";
+      download(it.blob, `${it.kind === "zoom" ? "zoom" : "panorama"}-${stamp(it.time)}.${ext}`);
+    });
+    const del = document.createElement("button");
+    del.className = "btn"; del.type = "button"; del.textContent = "Borrar";
+    del.addEventListener("click", async () => { await store.del(it.id); refreshGallery(); });
+    acts.append(dl, del);
+    card.append(media, cap, acts);
+    g.append(card);
+  }
+  try {
+    const e = await navigator.storage.estimate();
+    await store.ready;
+    $("galleryInfo").textContent = (store.persistent() ? "Se guardan solo en este navegador" : "Almacenamiento temporal: se pierde al cerrar la página")
+      + ` · ${Math.round((e.usage || 0) / 1048576)} MB usados`;
+  } catch (err) { $("galleryInfo").textContent = ""; }
+}
+
+let clearArmed = 0;
+$("clearGallery").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  if (!clearArmed) {
+    btn.textContent = "¿Seguro?";
+    clearArmed = setTimeout(() => { clearArmed = 0; btn.textContent = "Borrar todo"; }, 3000);
+    return;
+  }
+  clearTimeout(clearArmed); clearArmed = 0; btn.textContent = "Borrar todo";
+  await store.clear();
+  refreshGallery();
+});
+
+/* ---------- Controles ---------- */
+$("conf").addEventListener("input", async (e) => {
+  const v = Number(e.target.value);
+  $("confVal").textContent = v + "%";
+  if (detector && running) {
+    try { await detector.setOptions({ minDetectionConfidence: v / 100 }); } catch (err) { /* nada */ }
+  }
+});
+$("frame").addEventListener("input", (e) => {
+  $("frameVal").textContent = (Number(e.target.value) / 10).toFixed(1) + "× el rostro";
+});
+$("clearLog").addEventListener("click", () => {
+  $("log").innerHTML = '<li class="empty">Aún no hay eventos.</li>';
+});
+$("exportLog").addEventListener("click", () => {
+  if (!events.length) return;
+  const rows = ["fecha,evento", ...events.map((e) => `${e.t.toISOString()},"${e.text.replace(/"/g, '""')}"`)];
+  download(new Blob([rows.join("\n")], { type: "text/csv" }), `bitacora-${stamp(Date.now())}.csv`);
+});
+recBtn.addEventListener("click", () => {
+  manualRec = !manualRec;
+  log(manualRec ? "Grabación manual iniciada" : "Grabación manual detenida");
+  syncRecording(performance.now());
+  updateRecUI();
+});
+startBtn.addEventListener("click", start);
+stopBtn.addEventListener("click", stop);
+flipBtn.addEventListener("click", flip);
+
+/* ---------- Respaldo: analizar una foto ---------- */
+$("photoBtn").addEventListener("click", () => $("photoInput").click());
+$("photoInput").addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const out = $("photoResult");
+  out.textContent = "Analizando…";
+  if (running) stop();
+  try {
+    await loadDetector();
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await img.decode();
+    await detector.setOptions({ runningMode: "IMAGE", minDetectionConfidence: Number($("conf").value) / 100 });
+    const dets = detector.detect(img).detections;
+    await detector.setOptions({ runningMode: "VIDEO" });
+    const c = $("photoCanvas");
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const pc = c.getContext("2d");
+    pc.drawImage(img, 0, 0);
+    drawFaces(pc, dets, c.width, c.height);
+    c.style.display = "block";
+    out.textContent = dets.length === 0 ? "No se detectaron rostros en la foto."
+      : `${dets.length} ${dets.length === 1 ? "rostro detectado" : "rostros detectados"} en la foto.`;
+    URL.revokeObjectURL(img.src);
+  } catch (err) {
+    out.textContent = "No se pudo analizar la foto. Revisa tu conexión e inténtalo de nuevo.";
+  }
+  e.target.value = "";
+});
+
+window.addEventListener("pagehide", () => { stopRec("pano"); stopRec("zoom"); stopStream(); closeSecond(); });
+refreshGallery();
+</script>
+</body>
+</html>
